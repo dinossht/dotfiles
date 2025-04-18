@@ -24,3 +24,14 @@ if [ -f /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
     source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
 fi
 
+# Git aliases
+alias gst='git status'
+alias ga='git add'
+alias gp='git push'
+alias gb='git branch'
+alias gc='git commit'
+alias gd='git diff'
+alias go='git checkout'
+alias gl='git log'
+alias gcm='git commit -m'
+
