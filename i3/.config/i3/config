@@ -1,0 +1,48 @@
+# Set mod key (Mod4 = Super/Windows key)
+set $mod Mod4
+
+# Font for window titles
+font pango:monospace 10
+
+# Use Mouse+$mod to drag floating windows
+floating_modifier $mod
+
+# Start a terminal
+bindsym $mod+Return exec alacritty
+
+# Kill focused window
+bindsym $mod+Shift+q kill
+
+# Start dmenu (or rofi)
+bindsym $mod+d exec dmenu_run
+
+# Change focus
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+
+# Move focused window
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+
+# Split orientation
+bindsym $mod+v split v
+bindsym $mod+b split h
+
+# Reload the config file
+bindsym $mod+Shift+c reload
+# Restart i3 in-place (preserves layout/session)
+bindsym $mod+Shift+r restart
+
+# Exit i3 (logout)
+bindsym $mod+Shift+e exit
+
+# Set wallpaper (optional, needs feh)
+exec --no-startup-id feh --bg-scale ~/Pictures/wall.jpg
+
+# Start picom (compositor, optional)
+exec --no-startup-id picom
+
