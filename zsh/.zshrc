@@ -35,3 +35,4 @@ alias go='git checkout'
 alias gl='git log'
 alias gcm='git commit -m'
 
+alias cursor="/home/dino/Applications/cursor/cursor.AppImage --no-sandbox"
