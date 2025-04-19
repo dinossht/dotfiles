@@ -11,6 +11,7 @@ vim.opt.termguicolors = true
 -- Keymap example
 vim.keymap.set('n', '<Space>', '<Nop>', { silent = true })
 vim.keymap.set('i', 'jj', '<Esc>', { noremap = true, silent = true })
+vim.keymap.set('i', 'jk', '<Esc>:w<CR>', { noremap = true, silent = true })
 
 -- Plugin manager (lazy.nvim)
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
