@@ -1,6 +1,7 @@
-*.swp
-*.swo
 *.bak
-*.tmp
-*.log
 .DS_Store
+lazy-lock.json
+*.log
+*.swo
+*.swp
+*.tmp

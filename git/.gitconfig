@@ -1,0 +1,39 @@
+[user]
+	email = dinosshan@birdsview.no
+	name = dinosshan
+[core]
+    editor = nvim
+    pager = delta
+    autocrlf = input
+[delta]
+    features = side-by-side line-numbers decorations
+    whitespace-error-style = 22 reverse
+    navigate = true
+[interactive]
+    diffFilter = delta --color-only
+[pager]
+    diff = true
+    log = true
+    show = true
+[safe]
+	directory = /home/dino/code/bv-lidar/data/catkin_ws/src/FAST_LIO
+	directory = /home/dino/code/bv-tracker/src/FAST_LIO
+	directory = /home/dino/code/bv-tracker
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
+[init]
+	defaultBranch = master
+[diff]
+	tool = kitten
+[difftool "kitten"]
+	cmd = kitten diff $LOCAL $REMOTE
+[difftool]
+	prompt = false
+[merge]
+	tool = kitten
+[mergetool "kitten"]
+	cmd = kitten diff $BASE $LOCAL $REMOTE $MERGED
+	trustExitCode = true

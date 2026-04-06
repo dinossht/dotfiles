@@ -1,0 +1,76 @@
+add_newline = false
+format = """[ ](bg:#1e1e2e fg:#a6e3a1)\
+$username\
+[](fg:#1e1e2e bg:#313244)\
+$directory\
+[](fg:#313244 bg:#45475a)\
+$git_branch\
+$git_status\
+[](fg:#45475a bg:none)\
+$rust\
+$golang\
+$java\
+$docker_context\
+$cmd_duration\
+ $character"""
+
+[os]
+disabled = true
+
+[username]
+show_always = true
+style_user = "bg:#1e1e2e fg:#89b4fa"
+format = "[$user@legion ]($style)"
+
+[directory]
+style = "bg:#313244 fg:#cdd6f4"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = " "
+style = "bg:#45475a fg:#a6e3a1"
+format = "[ $symbol$branch ]($style)"
+
+[git_status]
+style = "bg:#45475a fg:#f38ba8"
+format = "[$all_status$ahead_behind ]($style)"
+
+[nodejs]
+disabled = true
+
+[python]
+disabled = true
+
+[rust]
+symbol = " "
+style = "fg:#fab387"
+format = "[ $symbol$version ]($style)"
+
+[golang]
+symbol = " "
+style = "fg:#89dceb"
+format = "[ $symbol$version ]($style)"
+
+[java]
+symbol = " "
+style = "fg:#f38ba8"
+format = "[ $symbol$version ]($style)"
+
+[docker_context]
+symbol = " "
+style = "fg:#89b4fa"
+format = "[ $symbol$context ]($style)"
+
+[cmd_duration]
+min_time = 2_000
+style = "fg:#6c7086"
+format = "[ 󰔛 $duration ]($style)"
+
+[character]
+success_symbol = "[❯](bold #a6e3a1)"
+error_symbol = "[❯](bold #f38ba8)"
+
+[line_break]
+disabled = true
