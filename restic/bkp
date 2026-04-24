@@ -1,0 +1,347 @@
+#!/bin/bash
+# bkp — unified CLI for the restic backup setup.
+# Wraps restic + systemd timer + logs into a few friendly subcommands.
+#
+#   bkp                 show status (default)
+#   bkp help            show all subcommands
+#
+# Lives in ~/.dotfiles/restic/bkp. Symlink into PATH with:
+#   ln -sf ~/.dotfiles/restic/bkp ~/.local/bin/bkp
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$SCRIPT_DIR/env.sh"
+
+LOG_DIR="$HOME/.local/state/restic"
+LOG="$LOG_DIR/backup.log"
+MOUNT_DEFAULT="$HOME/restic-mount"
+
+# ---- colors ---------------------------------------------------------------
+if [ -t 1 ]; then
+  C_B=$'\033[1m'; C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'
+  C_C=$'\033[36m'; C_D=$'\033[2m'; C_0=$'\033[0m'
+else
+  C_B=; C_R=; C_G=; C_Y=; C_C=; C_D=; C_0=
+fi
+
+die() { printf "%serror:%s %s\n" "$C_R" "$C_0" "$*" >&2; exit 1; }
+section() { printf "\n%s%s%s\n" "$C_B" "$*" "$C_0"; }
+
+# ---- subcommands ----------------------------------------------------------
+
+cmd_status() {
+  section "repo"
+  printf "  %s\n" "$RESTIC_REPOSITORY"
+
+  local running=0
+  section "running backup?"
+  if pgrep -f 'restic backup' >/dev/null; then
+    running=1
+    local pids etime
+    pids=$(pgrep -d, -f 'restic backup')
+    etime=$(ps -o etime= -p "$(pgrep -f 'restic backup' | head -1)" 2>/dev/null | tr -d ' ')
+    printf "  %syes%s — pid(s): %s  (running for %s)\n" "$C_Y" "$C_0" "$pids" "$etime"
+  else
+    printf "  %sno%s\n" "$C_D" "$C_0"
+  fi
+
+  section "systemd timer"
+  if systemctl --user is-active --quiet restic-backup.timer; then
+    local next last
+    next=$(systemctl --user show restic-backup.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
+    last=$(systemctl --user show restic-backup.service -p ExecMainStartTimestamp --value 2>/dev/null || true)
+    printf "  %sactive%s\n" "$C_G" "$C_0"
+    [ -n "$next" ] && printf "  next run:  %s\n" "$next"
+    [ -n "$last" ] && printf "  last run:  %s\n" "$last"
+  else
+    printf "  %sinactive%s (enable with: bkp timer enable)\n" "$C_Y" "$C_0"
+  fi
+
+  section "repo size (committed snapshots)"
+  timeout 15 restic stats --no-lock --mode raw-data 2>/dev/null \
+    | grep -E 'Total|Snapshots' | sed 's/^/  /' \
+    || printf "  (stats unreachable — probably still uploading initial snapshot)\n"
+
+  # Skip restic snapshots/stats while a backup is running — it holds the lock
+  # and these calls will hang waiting. Show them only when idle.
+  if [ "$running" = 0 ]; then
+    section "latest snapshots"
+    timeout 15 restic snapshots --latest 5 --compact 2>/dev/null \
+      || printf "  (restic unreachable — repo rate-limited or locked)\n"
+  else
+    section "latest snapshots"
+    printf "  %s(skipped while backup is running)%s\n" "$C_D" "$C_0"
+  fi
+
+  section "log tail"
+  if [ -f "$LOG" ]; then
+    # Skip noisy rclone 500-error spam for the tail — show only script/restic lines.
+    grep -v '^rclone:' "$LOG" | tail -n 6 | sed 's/^/  /'
+  else
+    printf "  (no log yet at %s)\n" "$LOG"
+  fi
+}
+
+cmd_run() {
+  if pgrep -f 'restic backup' >/dev/null; then
+    die "a backup is already running. See: bkp logs -f"
+  fi
+  if [ "${1:-}" = "--fg" ] || [ "${1:-}" = "--foreground" ]; then
+    exec "$SCRIPT_DIR/backup.sh"
+  fi
+  printf "starting backup in background...\n"
+  nohup "$SCRIPT_DIR/backup.sh" >/dev/null 2>&1 &
+  local pid=$!
+  printf "  pid %d; logs: bkp logs -f\n" "$pid"
+}
+
+cmd_logs() {
+  [ -f "$LOG" ] || die "no log at $LOG"
+  if [ "${1:-}" = "-f" ]; then
+    tail -f "$LOG"
+  else
+    tail -n "${1:-50}" "$LOG"
+  fi
+}
+
+cmd_snapshots() {
+  restic snapshots "$@"
+}
+
+cmd_ls() {
+  [ $# -ge 1 ] || die "usage: bkp ls <snapshot-id|latest> [path]"
+  restic ls "$@"
+}
+
+cmd_diff() {
+  [ $# -eq 2 ] || die "usage: bkp diff <snapshot1> <snapshot2>"
+  restic diff "$@"
+}
+
+cmd_restore() {
+  [ $# -ge 1 ] || die "usage: bkp restore <snapshot-id|latest> [--target dir] [--include path]..."
+  local snap="$1"; shift
+  local target="./restore-$(date +%Y%m%d-%H%M%S)"
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --target) target="$2"; shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  mkdir -p "$target"
+  printf "restoring %s into %s ...\n" "$snap" "$target"
+  restic restore "$snap" --target "$target" "${args[@]}"
+}
+
+cmd_mount() {
+  local dir="${1:-$MOUNT_DEFAULT}"
+  mkdir -p "$dir"
+  if mountpoint -q "$dir"; then
+    die "$dir is already a mountpoint. Use: bkp umount $dir"
+  fi
+  printf "mounting repo at %s (Ctrl+C to unmount)\n" "$dir"
+  exec restic mount "$dir"
+}
+
+cmd_umount() {
+  local dir="${1:-$MOUNT_DEFAULT}"
+  fusermount -u "$dir" && printf "unmounted %s\n" "$dir"
+}
+
+cmd_excludes() {
+  if [ "${1:-}" = "--show" ] || [ "${1:-}" = "-s" ]; then
+    grep -v -E '^\s*($|#)' "$SCRIPT_DIR/excludes.txt"
+  else
+    "${EDITOR:-nvim}" "$SCRIPT_DIR/excludes.txt"
+  fi
+}
+
+cmd_targets() {
+  if [ "${1:-}" = "--edit" ] || [ "${1:-}" = "-e" ]; then
+    "${EDITOR:-nvim}" "$SCRIPT_DIR/targets.txt"
+    return
+  fi
+  section "targets (from $SCRIPT_DIR/targets.txt)"
+  local size
+  while IFS= read -r line; do
+    line="${line%%#*}"; line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [ -z "$line" ] && continue
+    if [ -e "$line" ] || [ -L "$line" ]; then
+      size=$(sudo -n du -sh --apparent-size "$line" 2>/dev/null | cut -f1 || du -sh "$line" 2>/dev/null | cut -f1 || echo "?")
+      printf "  %s✓%s  %-45s %s\n" "$C_G" "$C_0" "$line" "$size"
+    else
+      printf "  %s✗%s  %s %s(missing)%s\n" "$C_R" "$C_0" "$line" "$C_D" "$C_0"
+    fi
+  done < "$SCRIPT_DIR/targets.txt"
+
+  section "exclude rules (summary — see 'bkp excludes --show' for all)"
+  grep -v -E '^\s*($|#)' "$SCRIPT_DIR/excludes.txt" | head -10 | sed 's/^/  /'
+  local n
+  n=$(grep -cv -E '^\s*($|#)' "$SCRIPT_DIR/excludes.txt")
+  printf "  %s(%d rules total)%s\n" "$C_D" "$n" "$C_0"
+}
+
+cmd_disks() {
+  section "mounted filesystems"
+  df -hP -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs -x fuse.gvfsd-fuse 2>/dev/null \
+    | awk 'NR==1 {printf "  %-22s %6s %6s %6s %5s  %s\n", $1,$2,$3,$4,$5,$6} NR>1 {printf "  %-22s %6s %6s %6s %5s  %s\n", $1,$2,$3,$4,$5,$6}'
+
+  section "coverage by backup"
+  mapfile -t targets < <(grep -v -E '^\s*($|#)' "$SCRIPT_DIR/targets.txt")
+  # For each mount, decide if any target lives on it (first component match,
+  # since backup.sh uses --one-file-system).
+  while read -r mp fstype; do
+    [ -z "$mp" ] && continue
+    local covered="no" reason=""
+    for t in "${targets[@]}"; do
+      # Walk up from target until we find its mountpoint
+      local tm="$t"
+      while [ "$tm" != "/" ] && ! mountpoint -q "$tm" 2>/dev/null; do
+        tm=$(dirname "$tm")
+      done
+      if [ "$tm" = "$mp" ]; then
+        covered="yes"
+        reason="$t"
+        break
+      fi
+    done
+    if [ "$covered" = "yes" ]; then
+      printf "  %scovered%s  %-20s %s(via %s)%s\n" "$C_G" "$C_0" "$mp" "$C_D" "$reason" "$C_0"
+    else
+      printf "  %sskipped%s  %-20s %s(not in targets.txt)%s\n" "$C_Y" "$C_0" "$mp" "$C_D" "$C_0"
+    fi
+  done < <(findmnt -lno TARGET,FSTYPE -t ext4,btrfs,xfs,zfs,ntfs,exfat,vfat,f2fs 2>/dev/null)
+}
+
+cmd_config() {
+  cmd_targets
+  section "disks"
+  cmd_disks 2>&1 | tail -n +1 | sed -n '/mounted filesystems/,$p'
+}
+
+cmd_size() {
+  # Backend-aware size reporting. For rclone-based repos we can cheaply count
+  # bytes on the remote (shows in-progress uploads). For native backends like
+  # b2: we fall back to restic stats, which only sees committed snapshots.
+  if [[ "$RESTIC_REPOSITORY" == rclone:* ]]; then
+    section "remote size (incl. in-progress)"
+    rclone size "${RESTIC_REPOSITORY#rclone:}" 2>&1 | sed 's/^/  /'
+  fi
+  section "restic stats — raw-data (committed only)"
+  restic stats --no-lock --mode raw-data 2>&1 | grep -E 'Total|Snapshots' | sed 's/^/  /'
+  section "restic stats — restore-size"
+  restic stats --no-lock --mode restore-size 2>&1 | grep -E 'Total|Snapshots' | sed 's/^/  /'
+}
+
+cmd_check() {
+  restic check "$@"
+}
+
+cmd_forget() {
+  printf "applying retention policy (keep-daily 14, keep-weekly 8, keep-monthly 24) + prune...\n"
+  restic forget --keep-daily 14 --keep-weekly 8 --keep-monthly 24 --prune "$@"
+}
+
+cmd_timer() {
+  local sub="${1:-status}"
+  case "$sub" in
+    status)
+      systemctl --user status restic-backup.timer --no-pager
+      ;;
+    enable)
+      systemctl --user daemon-reload
+      systemctl --user enable --now restic-backup.timer
+      printf "timer enabled.\n"
+      ;;
+    disable)
+      systemctl --user disable --now restic-backup.timer
+      printf "timer disabled.\n"
+      ;;
+    list)
+      systemctl --user list-timers --all restic-backup.timer
+      ;;
+    *) die "timer: unknown subcommand '$sub' (status|enable|disable|list)" ;;
+  esac
+}
+
+cmd_password() {
+  [ -f "$RESTIC_PASSWORD_FILE" ] || die "no password file at $RESTIC_PASSWORD_FILE"
+  if command -v xclip >/dev/null 2>&1; then
+    tr -d '\n' < "$RESTIC_PASSWORD_FILE" | xclip -selection clipboard
+    printf "password copied to clipboard (primary = xclip).\n"
+  elif command -v wl-copy >/dev/null 2>&1; then
+    tr -d '\n' < "$RESTIC_PASSWORD_FILE" | wl-copy
+    printf "password copied to clipboard (wayland).\n"
+  else
+    cat "$RESTIC_PASSWORD_FILE"
+  fi
+}
+
+cmd_capture() {
+  exec "$HOME/.dotfiles/capture-state.sh"
+}
+
+cmd_help() {
+  cat <<EOF
+${C_B}bkp${C_0} — restic backup CLI
+
+  ${C_C}bkp${C_0}                         show status (same as: bkp status)
+  ${C_C}bkp status${C_0}                  show repo, timer, latest snapshots, log tail
+  ${C_C}bkp run${C_0} [--fg]              run a backup now (bg by default; --fg attaches)
+  ${C_C}bkp logs${C_0} [-f|N]             show log (default last 50 lines); -f to follow
+  ${C_C}bkp snapshots${C_0} [args…]       list snapshots (passes args to restic)
+  ${C_C}bkp ls${C_0} <snap> [path]        list files in a snapshot
+  ${C_C}bkp diff${C_0} <snap1> <snap2>    diff two snapshots
+  ${C_C}bkp restore${C_0} <snap> [opts]   restore files; default target ./restore-<ts>
+  ${C_C}bkp mount${C_0} [dir]             mount repo via FUSE for browsing (Ctrl+C to unmount)
+  ${C_C}bkp umount${C_0} [dir]            unmount
+  ${C_C}bkp config${C_0}                  show targets + excludes + disk coverage (all-in-one)
+  ${C_C}bkp targets${C_0} [--edit]        show paths being backed up (or edit targets.txt)
+  ${C_C}bkp excludes${C_0} [--show]       edit exclusion rules (--show prints them)
+  ${C_C}bkp disks${C_0}                   show mounted filesystems and which are covered
+  ${C_C}bkp size${C_0}                    show repo size on Drive + restic stats
+  ${C_C}bkp check${C_0}                   verify repo integrity
+  ${C_C}bkp forget${C_0}                  apply retention policy + prune
+  ${C_C}bkp timer${C_0} [status|enable|disable|list]   manage systemd timer
+  ${C_C}bkp password${C_0}                copy repo password to clipboard (or print)
+  ${C_C}bkp capture${C_0}                 regenerate packages-*.txt in ~/.dotfiles/
+  ${C_C}bkp help${C_0}                    this help
+
+Config lives in ~/.dotfiles/restic/:
+  env.sh         repo URL, rclone tuning env vars
+  backup.sh      the backup script run by the timer
+  excludes.txt   exclusion rules
+
+Password file: ~/.config/restic/password (mode 600). BACK UP SEPARATELY.
+EOF
+}
+
+# ---- dispatch -------------------------------------------------------------
+cmd="${1:-status}"
+shift || true
+
+case "$cmd" in
+  status|st)       cmd_status "$@" ;;
+  run|backup)      cmd_run "$@" ;;
+  logs|log)        cmd_logs "$@" ;;
+  snapshots|snaps) cmd_snapshots "$@" ;;
+  ls)              cmd_ls "$@" ;;
+  diff)            cmd_diff "$@" ;;
+  restore)         cmd_restore "$@" ;;
+  mount)           cmd_mount "$@" ;;
+  umount|unmount)  cmd_umount "$@" ;;
+  excludes)        cmd_excludes "$@" ;;
+  targets)         cmd_targets "$@" ;;
+  disks|df)        cmd_disks "$@" ;;
+  config|show)     cmd_config "$@" ;;
+  size)            cmd_size "$@" ;;
+  check)           cmd_check "$@" ;;
+  forget|prune)    cmd_forget "$@" ;;
+  timer)           cmd_timer "$@" ;;
+  password|pw)     cmd_password "$@" ;;
+  capture)         cmd_capture "$@" ;;
+  help|-h|--help)  cmd_help ;;
+  *) die "unknown command: $cmd (try: bkp help)" ;;
+esac

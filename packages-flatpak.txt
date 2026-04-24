@@ -1,0 +1,2 @@
+com.prusa3d.PrusaSlicer
+com.stremio.Stremio

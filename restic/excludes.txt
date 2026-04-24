@@ -1,0 +1,48 @@
+# Regenerable caches / build artifacts
+**/.cache
+**/node_modules
+**/target
+**/build
+**/dist
+**/__pycache__
+**/.venv
+**/venv
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.tox
+**/.next
+**/.nuxt
+
+# Reinstallable environments
+/home/dino/miniconda3
+/home/dino/snap
+
+# Symlinks into /mnt/ssd2 (excluded entirely)
+/home/dino/Downloads
+/home/dino/nvidia
+/home/dino/SSD
+/home/dino/ssd2
+
+# External SSD
+/mnt/ssd2
+
+# Trash / tmp / junk
+**/.Trash-*
+**/Trash
+**/*.tmp
+**/*.swp
+**/*.pyc
+**/.DS_Store
+
+# Browser caches (Chrome / Firefox cache, not profiles)
+/home/dino/.config/google-chrome/*/Cache*
+/home/dino/.config/google-chrome/*/Code Cache
+/home/dino/.config/google-chrome/*/GPUCache
+/home/dino/.mozilla/firefox/*/cache2
+
+# Session/runtime
+/home/dino/.local/share/Trash
+
+# Restic's own cache
+/home/dino/.cache/restic

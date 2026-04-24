@@ -1,0 +1,14 @@
+# Paths that will be backed up by restic.
+# One path per line. Lines starting with # and blank lines are ignored.
+# Note: backup.sh runs with --one-file-system, so these paths won't
+# cross mount boundaries. If you want a separate filesystem backed up
+# (e.g. /mnt/ssd2), add it here explicitly.
+
+/home/dino
+
+# Selected /etc files (world-readable only — NetworkManager secrets need root)
+/etc/fstab
+/etc/hosts
+/etc/hostname
+/etc/crontab
+/etc/cron.d
