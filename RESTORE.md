@@ -1,114 +1,130 @@
 # Full-system restore — from a dead/bricked laptop
 
 This is the runbook for getting back to a working setup if this laptop is lost,
-stolen, bricked, or ransomware'd. Time budget: **~1.5–2 hours**.
+stolen, bricked, or ransomware'd. Time budget: **~1.5 hours** if Drive mirror
+is healthy.
+
+## Architecture
+
+- **Primary repo:** `/mnt/ssd2/restic-laptop` — fast local NVMe, daily backups
+- **Off-site mirror:** `gdrive-personal:RestricBackup-laptop` — weekly rclone sync from primary
+- Both repos are restic format, encrypted with the same password
+
+The restore strategy is: **download the Drive mirror to a working filesystem,
+then `restic restore` from there.**
 
 ## What you need on hand
 
 - **Ubuntu 24.04 LTS** install USB (or newer)
-- Your **password manager** (e.g. Proton Pass, 1Password) — you'll need:
-  1. **Restic repo password** — stored as "restic-laptop repo password"
-  2. **Backblaze B2 keyID** — stored as "B2 keyID restic-laptop"
-  3. **Backblaze B2 applicationKey** — stored as "B2 applicationKey restic-laptop"
-  4. **GitHub SSH key or PAT** — for cloning this dotfiles repo
-- Internet (40+ GB of download: system + your backup)
+- Your **password manager** with:
+  1. **Restic repo password** — required to decrypt the backup
+- Internet (35+ GB of total download: Ubuntu + your repo)
+- A working Google account with rclone access to the personal gdrive
 
-> ⚠️ **Without items 1–3 above the B2 backup is unrecoverable.** The repo is
-> client-side encrypted — losing the password means losing the data. Verify
-> those values exist in your password manager **before** you need them.
+> ⚠️ **Without the restic password the backup is unrecoverable.** It's
+> encrypted client-side. The password lives only at `~/.config/restic/password`
+> on the laptop AND in your password manager. Verify both.
 
 ## Step-by-step
 
 ### 1. Fresh Ubuntu install
 
-Install Ubuntu 24.04 from USB, normal workflow. Username `dino`, same hostname
-`dino-legion-...`. Update (`sudo apt update && sudo apt upgrade -y`). Reboot.
+Install Ubuntu 24.04 from USB. Username `dino`. Update + reboot.
 
-### 2. Install the three things needed to pull everything else
+### 2. Install the tools
 
 ```bash
-sudo apt install -y restic git curl stow
+sudo apt install -y restic git curl rclone stow
 ```
 
-### 3. Clone dotfiles
+### 3. Clone dotfiles (has bkp, scripts, package lists)
 
 ```bash
 cd ~
 git clone git@github.com:dinossht/dotfiles.git .dotfiles
-# Or, if SSH not set up yet:
+# or, if SSH not set up yet:
 # git clone https://github.com/dinossht/dotfiles.git .dotfiles
 ```
 
-### 4. Recreate the two credential files (paste from password manager)
+### 4. Restore the restic password from your password manager
 
 ```bash
 mkdir -p ~/.config/restic
 umask 077
-
-# Restic repo password
 printf '%s' 'PASTE_RESTIC_PASSWORD_FROM_PW_MANAGER' > ~/.config/restic/password
 chmod 600 ~/.config/restic/password
-
-# B2 credentials
-cat > ~/.config/restic/b2-credentials <<'EOF'
-export B2_ACCOUNT_ID="PASTE_KEYID_FROM_PW_MANAGER"
-export B2_ACCOUNT_KEY="PASTE_APPLICATIONKEY_FROM_PW_MANAGER"
-EOF
-chmod 600 ~/.config/restic/b2-credentials
 ```
 
-### 5. Restore `/home/dino` from the B2 snapshot
+### 5. Configure rclone for Google Drive
+
+Use your own OAuth client ID (recommended) or fall back to the shared one:
 
 ```bash
-source ~/.dotfiles/restic/env.sh
-restic snapshots                 # sanity check — should list your snapshots
-restic restore latest --target /  # restores /home/dino/... and /etc/... paths
+rclone config
+# Add new remote named "gdrive-personal", type drive
+# Use existing OAuth client_id/secret from a Google Cloud project,
+# or leave blank for the (rate-limited) default
 ```
 
-Typical time: 30–90 min depending on internet speed.
+### 6. Pull the off-site mirror down to a working location
 
-### 6. Reinstall apps + stow configs
+```bash
+mkdir -p /tmp/restic-mirror
+rclone copy gdrive-personal:RestricBackup-laptop /tmp/restic-mirror \
+  --progress --transfers 8
+```
+
+This downloads ~25 GiB. ~30–60 min on home fiber.
+
+### 7. Restore /home from the local copy
+
+```bash
+export RESTIC_REPOSITORY=/tmp/restic-mirror
+export RESTIC_PASSWORD_FILE=$HOME/.config/restic/password
+restic snapshots                  # sanity check
+restic restore latest --target /  # writes to /home/dino/... and /etc/...
+```
+
+### 8. Reinstall apps + stow configs
 
 ```bash
 cd ~/.dotfiles
 ./bootstrap.sh
 ```
 
-This installs every apt package in `packages-apt.txt`, every snap in
-`packages-snap.txt`, every flatpak in `packages-flatpak.txt`, enables the
-daily restic timer, and stows all dotfiles. ~15–30 min.
+This installs every apt/snap/flatpak from the lists, enables the daily restic
+timer (which will start writing to `/mnt/ssd2/restic-laptop` again — make sure
+that path exists or change it), and stows all dotfiles. ~15–30 min.
 
-### 7. Final touches
+### 9. Final touches
 
+- **Mount /mnt/ssd2** (fstab is restored, but if the SSD is brand new, format
+  it and update `/etc/fstab`).
 - **WiFi**: click the network icon → enter passwords (not in backup by design).
-- **Chrome / Firefox**: log in, bookmarks/extensions re-sync from your account.
-- **ProtonVPN**: log in via the app.
-- **Conda envs** (if needed): `conda env create -f ~/.dotfiles/conda-envs/<env>.yml`
-- **SSH keys**: verify `~/.ssh/` was restored (should be — it's in `$HOME`).
-- **Verify backups run**: `bkp` — you should see the timer active and your
-  snapshots. Trigger a manual fresh backup with `bkp run` to confirm.
+- **Browsers, ProtonVPN, etc**: log in.
+- **Conda envs** (if any): `conda env create -f ~/.dotfiles/conda-envs/<env>.yml`
+- **Verify backups run**: `bkp` — should show daily timer active. Trigger a
+  fresh backup with `bkp run`. Trigger a fresh mirror with `bkp mirror`.
 
-## Getting to a file without a full restore
-
-If the laptop is fine but you just need one file from a past snapshot:
+## Recovering one file (no full restore)
 
 ```bash
-# Mount the remote repo as a filesystem (FUSE):
-bkp mount                        # defaults to ~/restic-mount; Ctrl+C to unmount
-# Or restore just one path:
+bkp mount             # FUSE-mount repo at ~/restic-mount; Ctrl+C to unmount
+# or:
 bkp restore latest --include /home/dino/Documents/foo.pdf --target /tmp/recover
 ```
 
 ## If something is off
 
-- `bkp status` — shows repo, running backup, timer, log tail
-- `bkp logs 100` — recent log
-- `bkp check` — verifies repo integrity
-- `restic snapshots --no-lock` — raw snapshot list
+```bash
+bkp status            # one-shot summary
+bkp logs 100          # recent backup log
+bkp check             # verify repo integrity
+bkp progress          # bytes uploaded + ETA when running
+```
 
-## The two secrets — where they live on a working system
+## The secret(s) — where they live on a working system
 
 - **Restic repo password:** `~/.config/restic/password` (mode 600)
-- **B2 credentials:** `~/.config/restic/b2-credentials` (mode 600)
 
-Both are NOT in this git repo. Back them up only to your password manager.
+This is NOT in the dotfiles git repo. Back it up only to your password manager.

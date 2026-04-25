@@ -222,12 +222,15 @@ cmd_config() {
 }
 
 cmd_size() {
-  # Backend-aware size reporting. For rclone-based repos we can cheaply count
-  # bytes on the remote (shows in-progress uploads). For native backends like
-  # b2: we fall back to restic stats, which only sees committed snapshots.
+  # Backend-aware size reporting.
   if [[ "$RESTIC_REPOSITORY" == rclone:* ]]; then
     section "remote size (incl. in-progress)"
     rclone size "${RESTIC_REPOSITORY#rclone:}" 2>&1 | sed 's/^/  /'
+  elif [[ "$RESTIC_REPOSITORY" == /* ]]; then
+    section "local repo size on disk"
+    du -sh "$RESTIC_REPOSITORY" 2>&1 | sed 's/^/  /'
+    section "free space on backup volume"
+    df -h "$RESTIC_REPOSITORY" 2>&1 | tail -1 | awk '{printf "  %s used / %s avail (%s)\n", $3, $4, $1}'
   fi
   section "restic stats — raw-data (committed only)"
   restic stats --no-lock --mode raw-data 2>&1 | grep -E 'Total|Snapshots' | sed 's/^/  /'
@@ -283,6 +286,147 @@ cmd_capture() {
   exec "$HOME/.dotfiles/capture-state.sh"
 }
 
+cmd_mirror() {
+  # Off-site mirror of the local restic repo to Google Drive via rclone.
+  # Restic repos are mostly append-only, so a plain `rclone sync` works fine
+  # and avoids the API-rate-limit hell that comes from using Drive as a
+  # restic backend directly.
+  local src="${RESTIC_REPOSITORY}"
+  local dst="${BKP_MIRROR_REMOTE:-gdrive-personal:RestricBackup-laptop}"
+
+  if [[ "$src" != /* ]]; then
+    die "mirror only works for local repos; current repo is $src"
+  fi
+  if [ ! -d "$src" ]; then
+    die "source repo $src not found"
+  fi
+
+  local log="$HOME/.local/state/restic/mirror.log"
+  mkdir -p "$(dirname "$log")"
+
+  printf "mirroring %s -> %s ...\n" "$src" "$dst"
+  printf "[%s] === mirror starting ===\n" "$(date -Iseconds)" >> "$log"
+
+  # Modest pacing — Drive rate-limits hard on bursty writes.
+  RCLONE_TRANSFERS=4 RCLONE_CHECKERS=8 \
+  RCLONE_DRIVE_PACER_MIN_SLEEP=20ms RCLONE_DRIVE_PACER_BURST=100 \
+    rclone sync "$src" "$dst" \
+      --fast-list \
+      --exclude '/locks/**' \
+      --log-file "$log" \
+      --log-level INFO \
+      "$@"
+
+  local rc=$?
+  printf "[%s] === mirror done (exit %d) ===\n" "$(date -Iseconds)" "$rc" >> "$log"
+  if [ $rc -eq 0 ]; then
+    printf "%sok%s — see %s for details\n" "$C_G" "$C_0" "$log"
+  else
+    printf "%sfailed%s with exit %d — see %s\n" "$C_R" "$C_0" "$rc" "$log"
+  fi
+  return $rc
+}
+
+cmd_progress() {
+  # Live upload progress by querying the remote directly. Works during a
+  # backup (unlike `restic stats` which needs the repo lock). For B2 we use
+  # rclone with on-the-fly backend creds from b2-credentials.
+  local repo="$RESTIC_REPOSITORY"
+  local remote_size="" elapsed="" rate="" target_gib="24"
+
+  if [[ "$repo" == b2:* ]]; then
+    # strip "b2:", split "bucket:path" → first colon
+    local rest="${repo#b2:}"
+    local bucket="${rest%%:*}"
+    local path="${rest#*:}"
+    if [ -f "$HOME/.config/restic/b2-credentials" ]; then
+      # shellcheck disable=SC1091
+      source "$HOME/.config/restic/b2-credentials"
+      remote_size=$(RCLONE_B2_ACCOUNT="$B2_ACCOUNT_ID" RCLONE_B2_KEY="$B2_ACCOUNT_KEY" \
+        timeout 20 rclone size ":b2:${bucket}/${path}" 2>/dev/null \
+        | awk -F'[()]' '/Total size/ {print $1}' | awk '{print $3,$4}')
+    fi
+  elif [[ "$repo" == rclone:* ]]; then
+    remote_size=$(timeout 20 rclone size "${repo#rclone:}" 2>/dev/null \
+      | awk -F'[()]' '/Total size/ {print $1}' | awk '{print $3,$4}')
+  elif [[ "$repo" == /* ]]; then
+    # Local path — use du, fast.
+    local raw
+    raw=$(du -sb "$repo" 2>/dev/null | awk '{print $1}')
+    if [ -n "$raw" ]; then
+      remote_size=$(awk -v b="$raw" 'BEGIN{
+        units[0]="B"; units[1]="KiB"; units[2]="MiB"; units[3]="GiB"; units[4]="TiB";
+        i=0; while(b>=1024 && i<4){b/=1024; i++}
+        printf "%.3f %s", b, units[i]
+      }')
+    fi
+  fi
+
+  section "upload to $repo"
+  if [ -n "$remote_size" ]; then
+    printf "  uploaded: %s\n" "$remote_size"
+  else
+    printf "  (couldn't query remote — check credentials)\n"
+    return
+  fi
+
+  if pgrep -f 'restic backup' >/dev/null; then
+    local pid
+    pid=$(pgrep -f 'restic backup' | head -1)
+    elapsed=$(ps -o etime= -p "$pid" | tr -d ' ')
+    printf "  running for: %s\n" "$elapsed"
+  else
+    printf "  no backup running (last snapshot is definitive size)\n"
+    return
+  fi
+
+  # Rate estimate: parse uploaded GiB/MiB → bytes, divide by elapsed seconds.
+  local bytes=0
+  local n unit
+  n=$(printf "%s" "$remote_size" | awk '{print $1}')
+  unit=$(printf "%s" "$remote_size" | awk '{print $2}')
+  case "$unit" in
+    KiB) bytes=$(awk -v n="$n" 'BEGIN{printf "%.0f", n*1024}') ;;
+    MiB) bytes=$(awk -v n="$n" 'BEGIN{printf "%.0f", n*1024*1024}') ;;
+    GiB) bytes=$(awk -v n="$n" 'BEGIN{printf "%.0f", n*1024*1024*1024}') ;;
+    TiB) bytes=$(awk -v n="$n" 'BEGIN{printf "%.0f", n*1024*1024*1024*1024}') ;;
+  esac
+
+  # elapsed may be "MM:SS", "HH:MM:SS", or "D-HH:MM:SS"
+  local secs=0 days=0 rest="$elapsed"
+  if [[ "$rest" == *-* ]]; then
+    days="${rest%%-*}"; rest="${rest#*-}"
+  fi
+  IFS=: read -r a b c <<<"$rest"
+  if [ -n "$c" ]; then
+    secs=$(( a*3600 + b*60 + c ))
+  else
+    secs=$(( a*60 + b ))
+  fi
+  secs=$(( secs + days*86400 ))
+  if [ "$secs" -gt 0 ]; then
+    local rate_bps=$(( bytes / secs ))
+    local rate_mibs=$(awk -v b="$rate_bps" 'BEGIN{printf "%.1f", b/(1024*1024)}')
+    printf "  rate:       %s MiB/s (%.1f GiB/hour)\n" "$rate_mibs" \
+      "$(awk -v b="$rate_bps" 'BEGIN{printf "%.1f", b*3600/(1024*1024*1024)}')"
+
+    # ETA against target (default 24 GiB; override with BKP_TARGET_GIB env)
+    local tgt="${BKP_TARGET_GIB:-$target_gib}"
+    local tgt_bytes
+    tgt_bytes=$(awk -v g="$tgt" 'BEGIN{printf "%.0f", g*1024*1024*1024}')
+    if [ "$bytes" -lt "$tgt_bytes" ] && [ "$rate_bps" -gt 0 ]; then
+      local remaining=$(( tgt_bytes - bytes ))
+      local eta_secs=$(( remaining / rate_bps ))
+      local eta_hms
+      eta_hms=$(awk -v s="$eta_secs" 'BEGIN{printf "%dh %dm", s/3600, (s%3600)/60}')
+      local pct
+      pct=$(awk -v b="$bytes" -v t="$tgt_bytes" 'BEGIN{printf "%.0f", b*100/t}')
+      printf "  target:     ~%s GiB (%s%%)\n" "$tgt" "$pct"
+      printf "  eta:        %s remaining\n" "$eta_hms"
+    fi
+  fi
+}
+
 cmd_help() {
   cat <<EOF
 ${C_B}bkp${C_0} — restic backup CLI
@@ -302,11 +446,13 @@ ${C_B}bkp${C_0} — restic backup CLI
   ${C_C}bkp excludes${C_0} [--show]       edit exclusion rules (--show prints them)
   ${C_C}bkp disks${C_0}                   show mounted filesystems and which are covered
   ${C_C}bkp size${C_0}                    show repo size on Drive + restic stats
+  ${C_C}bkp progress${C_0}                live uploaded bytes + rate + ETA during a backup
   ${C_C}bkp check${C_0}                   verify repo integrity
   ${C_C}bkp forget${C_0}                  apply retention policy + prune
   ${C_C}bkp timer${C_0} [status|enable|disable|list]   manage systemd timer
   ${C_C}bkp password${C_0}                copy repo password to clipboard (or print)
   ${C_C}bkp capture${C_0}                 regenerate packages-*.txt in ~/.dotfiles/
+  ${C_C}bkp mirror${C_0}                  rsync local repo to Google Drive (off-site mirror)
   ${C_C}bkp help${C_0}                    this help
 
 Config lives in ~/.dotfiles/restic/:
@@ -337,11 +483,13 @@ case "$cmd" in
   disks|df)        cmd_disks "$@" ;;
   config|show)     cmd_config "$@" ;;
   size)            cmd_size "$@" ;;
+  progress|eta)    cmd_progress "$@" ;;
   check)           cmd_check "$@" ;;
   forget|prune)    cmd_forget "$@" ;;
   timer)           cmd_timer "$@" ;;
   password|pw)     cmd_password "$@" ;;
   capture)         cmd_capture "$@" ;;
+  mirror)          cmd_mirror "$@" ;;
   help|-h|--help)  cmd_help ;;
   *) die "unknown command: $cmd (try: bkp help)" ;;
 esac

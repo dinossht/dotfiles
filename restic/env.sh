@@ -1,27 +1,16 @@
 #!/bin/bash
 # Source this file before running restic commands.
 # Example:  source ~/.dotfiles/restic/env.sh && restic snapshots
+#
+# This setup uses LOCAL backup to the secondary SSD at /mnt/ssd2 only.
+# That is fast, free, and reliable, but offers NO protection against laptop
+# theft, fire, or whole-machine loss. To add an off-site mirror later,
+# look into restic's `copy` command to a B2 / S3 / SFTP target.
 
-# --- Repo -------------------------------------------------------------------
-# Backblaze B2, native restic backend (no rclone in the loop).
-# Format:  b2:<bucket>:<path-prefix>
-export RESTIC_REPOSITORY="b2:dino-legion-backup:laptop"
+# --- Repo (local SSD) -------------------------------------------------------
+export RESTIC_REPOSITORY="/mnt/ssd2/restic-laptop"
 export RESTIC_PASSWORD_FILE="$HOME/.config/restic/password"
 
-# --- B2 credentials ---------------------------------------------------------
-# Read from a separate file (mode 600, NOT in dotfiles git). Create it with:
-#   umask 077
-#   cat > ~/.config/restic/b2-credentials <<'EOF'
-#   export B2_ACCOUNT_ID="<keyID from Backblaze>"
-#   export B2_ACCOUNT_KEY="<applicationKey from Backblaze>"
-#   EOF
-if [ -f "$HOME/.config/restic/b2-credentials" ]; then
-  # shellcheck disable=SC1091
-  source "$HOME/.config/restic/b2-credentials"
-fi
-
 # --- Tuning -----------------------------------------------------------------
-# Native restic B2 flags — B2 happily accepts parallelism.
-export RESTIC_PACK_SIZE=64
-# Connections for B2; 5-10 is a good sweet spot for a home uplink.
-# (set on the command line via --option b2.connections=8 if needed)
+# Local repo: bigger pack files = fewer files = faster scans.
+export RESTIC_PACK_SIZE=128
