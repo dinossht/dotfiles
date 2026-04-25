@@ -286,6 +286,52 @@ cmd_capture() {
   exec "$HOME/.dotfiles/capture-state.sh"
 }
 
+cmd_usb() {
+  # Back up to a different repo (e.g. an external USB drive) without touching
+  # the primary repo or schedule. Useful for occasional rotation: plug in
+  # external SSD → `bkp usb /media/dino/MyUSB/restic-laptop` → unplug.
+  local target="${1:-}"
+  if [ -z "$target" ]; then
+    cat <<EOF
+usage: bkp usb <path-to-repo-on-external-drive>
+
+Examples:
+  bkp usb /media/dino/MyUSB/restic-laptop          # mounted USB drive
+  bkp usb /run/media/dino/Backup/restic-laptop     # other automount path
+
+This runs a fresh restic backup to <path>, with the same targets and
+excludes as the daily backup. The target is initialized if it doesn't exist.
+The same restic password is used.
+
+Tip: keep two USB drives, rotate them weekly. Store one off-site (work,
+parent's house, safe deposit). That gets you a true 3-2-1 backup setup.
+EOF
+    return 1
+  fi
+
+  local parent
+  parent=$(dirname "$target")
+  [ -d "$parent" ] || die "parent directory $parent does not exist or isn't mounted"
+
+  # Init if needed (idempotent — restic init refuses on existing repo)
+  if [ ! -f "$target/config" ]; then
+    printf "initializing new restic repo at %s ...\n" "$target"
+    RESTIC_REPOSITORY="$target" restic init || die "restic init failed"
+  fi
+
+  printf "backing up to %s ...\n" "$target"
+  RESTIC_REPOSITORY="$target" restic backup \
+    --exclude-file="$SCRIPT_DIR/excludes.txt" \
+    --exclude-caches \
+    --one-file-system \
+    --tag="usb" \
+    --verbose=2 \
+    $(grep -v -E '^\s*($|#)' "$SCRIPT_DIR/targets.txt")
+
+  RESTIC_REPOSITORY="$target" restic forget \
+    --keep-daily 14 --keep-weekly 8 --keep-monthly 24 --prune
+}
+
 cmd_mirror() {
   # Off-site mirror of the local restic repo to Google Drive via rclone.
   # Restic repos are mostly append-only, so a plain `rclone sync` works fine
@@ -453,6 +499,7 @@ ${C_B}bkp${C_0} — restic backup CLI
   ${C_C}bkp password${C_0}                copy repo password to clipboard (or print)
   ${C_C}bkp capture${C_0}                 regenerate packages-*.txt in ~/.dotfiles/
   ${C_C}bkp mirror${C_0}                  rsync local repo to Google Drive (off-site mirror)
+  ${C_C}bkp usb${C_0} <path>              backup to an external USB repo (third copy / rotation)
   ${C_C}bkp help${C_0}                    this help
 
 Config lives in ~/.dotfiles/restic/:
@@ -490,6 +537,7 @@ case "$cmd" in
   password|pw)     cmd_password "$@" ;;
   capture)         cmd_capture "$@" ;;
   mirror)          cmd_mirror "$@" ;;
+  usb)             cmd_usb "$@" ;;
   help|-h|--help)  cmd_help ;;
   *) die "unknown command: $cmd (try: bkp help)" ;;
 esac

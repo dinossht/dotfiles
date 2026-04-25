@@ -13,6 +13,21 @@ LOGFILE="$LOG_DIR/backup.log"
 
 log() { printf '[%s] %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOGFILE"; }
 
+# Desktop notification on failure. Fires for any non-zero exit, including
+# uncaught errors from `set -e`. Best-effort; silently no-op if notify-send
+# isn't installed or there's no graphical session.
+notify_failure() {
+  local rc=$?
+  [ "$rc" -eq 0 ] && return
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send -u critical -i dialog-error \
+      "Backup failed" \
+      "restic backup exited with status $rc. Run: bkp logs" 2>/dev/null || true
+  fi
+  log "=== restic backup FAILED with exit $rc ==="
+}
+trap notify_failure EXIT
+
 # Concurrency guard — two layers:
 #   1. pgrep for any live restic backup process (catches orphans from older
 #      script invocations that predate the flock layer)
