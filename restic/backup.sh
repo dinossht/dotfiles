@@ -71,11 +71,24 @@ restic backup \
 log "=== backup done, running forget/prune ==="
 
 # Retention: generous since 2TB+ quota
-restic forget \
-  --keep-daily 14 \
-  --keep-weekly 8 \
-  --keep-monthly 24 \
-  --prune \
-  2>&1 | tee -a "$LOGFILE"
+forget_args=( --keep-daily 14 --keep-weekly 8 --keep-monthly 24 --prune )
+
+if ! restic forget "${forget_args[@]}" 2>&1 | tee -a "$LOGFILE"; then
+  # forget failed — usually because of a stale lock left by an earlier
+  # interrupted restic op. Only safe to auto-clear if no other restic is
+  # running right now.
+  log "forget failed — checking for stale lock..."
+  if pgrep -f 'restic ' >/dev/null; then
+    log "ERROR: another restic process is live; refusing to unlock"
+    exit 1
+  fi
+  log "no other restic process; clearing stale lock and retrying..."
+  restic unlock 2>&1 | tee -a "$LOGFILE" || true
+  if ! restic forget "${forget_args[@]}" 2>&1 | tee -a "$LOGFILE"; then
+    log "ERROR: forget still failed after auto-unlock — giving up"
+    exit 1
+  fi
+  log "forget succeeded after auto-unlock"
+fi
 
 log "=== restic backup finished successfully ==="
