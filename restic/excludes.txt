@@ -46,3 +46,6 @@
 
 # Restic's own cache
 /home/dino/.cache/restic
+
+# Intentionally-locked dirs (apps that strip permissions on purpose)
+/home/dino/Documents/Kit/shared/screenshots

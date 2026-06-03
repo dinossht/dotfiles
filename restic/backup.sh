@@ -13,12 +13,18 @@ LOGFILE="$LOG_DIR/backup.log"
 
 log() { printf '[%s] %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOGFILE"; }
 
-# Desktop notification on failure. Fires for any non-zero exit, including
-# uncaught errors from `set -e`. Best-effort; silently no-op if notify-send
-# isn't installed or there's no graphical session.
+# Desktop notification on failure. Restic exit codes:
+#   0 = clean success
+#   1 = real error, no snapshot saved
+#   3 = snapshot saved, but some files couldn't be read (warning)
+# We only popup on hard failures; exit 3 is just logged.
 notify_failure() {
   local rc=$?
   [ "$rc" -eq 0 ] && return
+  if [ "$rc" -eq 3 ]; then
+    log "=== restic backup finished with WARNINGS (exit 3: some files unreadable). Snapshot saved. ==="
+    return
+  fi
   if command -v notify-send >/dev/null 2>&1; then
     notify-send -u critical -i dialog-error \
       "Backup failed" \
