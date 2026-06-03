@@ -65,14 +65,26 @@ mapfile -t TARGETS < <(grep -v -E '^\s*($|#)' "$SCRIPT_DIR/targets.txt")
 # Back up.  --verbose=2 emits periodic progress lines so we can see how far
 # along we are in bkp logs / the log file (restic's TTY progress bar is not
 # shown when stdout is not a terminal).
-restic backup \
-  --exclude-file="$SCRIPT_DIR/excludes.txt" \
-  --exclude-caches \
-  --one-file-system \
-  --tag="auto" \
-  --verbose=2 \
-  "${TARGETS[@]}" \
-  2>&1 | tee -a "$LOGFILE"
+# Capture restic's exit code separately so we can distinguish warnings (3)
+# from real failures (1+).
+if restic backup \
+    --exclude-file="$SCRIPT_DIR/excludes.txt" \
+    --exclude-caches \
+    --one-file-system \
+    --tag="auto" \
+    --verbose=2 \
+    "${TARGETS[@]}" \
+    2>&1 | tee -a "$LOGFILE"; then
+  backup_rc=0
+else
+  backup_rc=${PIPESTATUS[0]}
+fi
+
+case "$backup_rc" in
+  0) log "backup OK (exit 0)" ;;
+  3) log "backup OK with warnings (exit 3: some files unreadable). Snapshot saved." ;;
+  *) log "ERROR: restic backup exited with $backup_rc — aborting"; exit "$backup_rc" ;;
+esac
 
 log "=== backup done, running forget/prune ==="
 
@@ -98,3 +110,4 @@ if ! restic forget "${forget_args[@]}" 2>&1 | tee -a "$LOGFILE"; then
 fi
 
 log "=== restic backup finished successfully ==="
+exit 0
